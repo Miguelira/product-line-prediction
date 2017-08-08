@@ -20,7 +20,7 @@ const request = require('request');
 const log4js = require('../utils/log4js-logger-util');
 const logger = log4js.getLogger('server/service-client');
 const debug = require('debug')('sample');
-const TOKEN_PATH = '/v2/identity/token';
+const TOKEN_PATH = '/v3/identity/token';
 
 const modelInfo = require('../config/model.json');
 var schema = modelInfo['model-schema'].map(obj => obj.name)
@@ -125,29 +125,50 @@ ServiceClient.prototype = {
     });
   },
 
-  _getModels: function (callback) {
-    logger.enter('getModels()');
+  _extendDeploymentWithModel: function (instanceDetails, deployments, callback) {
+    if (deployments.length === 0) {
+      callback(null, deployments);
+      return;
+    }
+
     let options = {
       method: 'GET',
-      uri: '/v3/wml_instances/' + this.credentials.instance_id + '/published_models'
+      uri: instanceDetails.entity.published_models.url
     };
-
-    this.performRequest(options, function (error, response, body) {
+    this.performRequest(options, (error, response, body) => {
       if (!error && response.statusCode === 200) {
         let models = JSON.parse(body).resources;
-        debug('all models', models);
-        return callback(null, models);
-      } else if (error) {
-        logger.error('getModels()', error);
-        return callback(error.message);
-      } else {
-        error = new Error('Service error code: ' + response.statusCode);
-        logger.error('getModels()', error);
-        return callback(error.message);
-      }
+        let result = deployments
+          .map((item) => {
+            let {entity} = item;
+            let {metadata} = item;
+            let model = models.find(m => m.metadata.guid === entity.published_model.guid);
+            model = model && model.entity;
+            return {
+              name: entity.name,
+              status: entity.status,
+              createdAt: item.metadata.created_at,
+              scoringHref: entity.scoring_url,
+              id: item.metadata.guid,
+              model: {
+                author: model.author && model.author.name ? model.author.name : undefined,
+                input_data_schema: model.input_data_schema,
+                runtimeEnvironment: model.runtime_environment,
+                name: model.name
+              }
+            };
+          });
+          return callback(null, result);
+        } else if (error) {
+          logger.error('getModels()', error);
+          return callback(error.message);
+        } else {
+          error = new Error('Service error code: ' + response.statusCode);
+          logger.error('getModels()', error);
+          return callback(error.message);
+        }
     });
   },
-
 
   _getInstanceDetails: function (callback) {
     logger.enter('getInstanceDetails()');
@@ -158,9 +179,9 @@ ServiceClient.prototype = {
 
     this.performRequest(options, function (error, response, body) {
       if (!error && response.statusCode === 200) {
-        let models = JSON.parse(body);
-        debug('instance details', models);
-        return callback(null, models);
+        let details = JSON.parse(body);
+        debug('instance details', details);
+        return callback(null, details);
       } else if (error) {
         logger.error('getInstanceDetails()', error);
         return callback(error.message);
@@ -173,70 +194,29 @@ ServiceClient.prototype = {
   },
 
   getDeployments: function (callback) {
-    logger.enter('getDeploymentsU()')
+    logger.enter('getDeployments()');
 
-    this._getInstanceDetails((error, result) => {
+    this._getInstanceDetails((error, instanceDetails) => {
       if (error) {
         return callback(error);
       } else {
-        let instanceDetails = result;
-
         let options = {
           method: 'GET',
-          uri: instanceDetails.entity.published_models.url
+          uri: instanceDetails.entity.deployments.url
         };
 
         this.performRequest(options, (error, response, body) => {
           if (!error && response.statusCode === 200) {
-            let deployments_parsed = JSON.parse(body)
-
-            let options = {
-              method: 'GET',
-              uri: deployments_parsed.resources[0].entity.deployments.url
-            };
-
-            this.performRequest(options, (error, response, body) => {
-              if (!error && response.statusCode === 200) {
-
-                let deployments = JSON.parse(body);
-                deployments = deployments && deployments.resources;
-                debug('all deployments', deployments);
-                deployments = deployments
-                  .map((item) => {
-                    let {entity} = item;
-                    let {metadata} = item;
-                    let dmHref = entity.deployed_version.url;
-                    debug('deployed version', dmHref);
-                    let dmGuid = entity.published_model.guid;
-                    debug("dmGuid", dmGuid)
-                    let model = deployments_parsed.resources.find(m => m.metadata.guid === dmGuid);
-                    if (model != null) {
-                      model = model.entity;
-                      model.trainingDataSchema = undefined;
-                      model.pipelineVersion = undefined;
-                      model.latestVersion = undefined;
-                      model.versionsHref = undefined;
-                    }
-                    if (model.author && model.author.name) {
-                      model.author = model.author.name;
-                    } else {
-                      model.author = undefined;
-                    }
-                    let result = {
-                      name: entity.name,
-                      status: entity.status,
-                      createdAt: item.metadata.created_at,
-                      scoringHref: entity.scoring_url,
-                      id: item.metadata.guid,
-                      model: model
-                    };
-                    return result;
-                  });
-                debug('matching & prepared online deployments: ', deployments);
-                return callback(null, deployments);
+            let deployments = JSON.parse(body);
+            deployments = deployments && deployments.resources;
+            debug('all deployments =>', deployments);
+            this._extendDeploymentWithModel(instanceDetails, deployments, (err, result) => {
+              if (err) {
+                return callback(err);
               }
-            }
-            )
+              debug('adjusted deployments: ', result);
+              return callback(null, result);
+            })
           } else if (error) {
             logger.error('getDeployments()', error);
             return callback(error.message);
